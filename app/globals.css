@@ -422,3 +422,321 @@ body {
   outline-offset: 2px;
   border-radius: var(--r-chip);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   AGENTIC SHOWCASE — Liquid Glyphs edition
+   The 3D machine-buyer surface at /showcase. Self-contained dark theme on the
+   obsidian palette from the design brief: it ignores the paper/night edition
+   on purpose, because the neural scene is a night piece.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.showcase {
+  --lg-bg: #09090b;
+  --lg-glass: rgba(24, 24, 27, 0.55);
+  --lg-glass-2: rgba(39, 39, 42, 0.65);
+  --lg-glass-3: rgba(24, 24, 27, 0.85);
+  --lg-line: rgba(255, 255, 255, 0.08);
+  --lg-line-strong: rgba(255, 255, 255, 0.14);
+  --lg-specular: inset 0 1px 0 0 rgba(255, 255, 255, 0.12);
+  --lg-text: #fafafa;
+  --lg-muted: #a1a1aa;
+  --lg-dim: #52525b;
+  --lg-lime: #a3e635;
+  --lg-lime-soft: rgba(163, 230, 53, 0.15);
+  --lg-blue: #38bdf8;
+  --lg-amber: #fb923c;
+  --lg-red: #f43f5e;
+  --lg-font-mono: var(--font-mono, "Space Mono", ui-monospace, monospace);
+  --lg-font-display: var(--font-display, "Space Grotesk", system-ui, sans-serif);
+  --lg-font-body: var(--font-sans, "Geist", system-ui, sans-serif);
+
+  position: relative;
+  margin: -20px -24px -32px; /* extend past main's padding, edge to edge */
+  background: var(--lg-bg);
+  color: var(--lg-text);
+  font-family: var(--lg-font-body);
+  overflow-x: clip;
+  color-scheme: dark;
+}
+
+@media (min-width: 640px) { .showcase { margin: -20px -24px -32px; } }
+@media (min-width: 768px) { .showcase { margin: -20px -32px -32px; } }
+
+/* Monospaced uppercase micro-labels — the telemetry voice. */
+.lg-label {
+  font-family: var(--lg-font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* ── Liquid glass tiers ─────────────────────────────────────────────────── */
+
+.lg-panel {
+  background: var(--lg-glass);
+  backdrop-filter: blur(24px) saturate(180%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  border: 1px solid var(--lg-line);
+  box-shadow: var(--lg-specular), 0 20px 40px -15px rgba(0, 0, 0, 0.7);
+  border-radius: 16px;
+}
+
+.lg-panel-2 {
+  background: var(--lg-glass-2);
+  backdrop-filter: blur(32px) saturate(200%);
+  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  border: 1px solid var(--lg-line-strong);
+  box-shadow: var(--lg-specular), 0 20px 40px -15px rgba(0, 0, 0, 0.7);
+  border-radius: 16px;
+}
+
+/* Sunken terminal wells. */
+.lg-well {
+  background: rgba(14, 14, 16, 0.9);
+  border: 1px solid var(--lg-line);
+  border-radius: 16px;
+  box-shadow: inset 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+
+/* ── Buttons & pills ─────────────────────────────────────────────────────── */
+
+.lg-btn-primary {
+  display: inline-flex; align-items: center; gap: 8px;
+  border-radius: 9999px; padding: 10px 22px;
+  background: #fafafa; color: #09090b;
+  font-family: var(--lg-font-mono); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+.lg-btn-primary:hover { transform: scale(1.02); box-shadow: 0 0 24px -4px rgba(163, 230, 53, 0.45); }
+.lg-btn-primary:disabled { opacity: 0.5; transform: none; cursor: wait; }
+
+.lg-btn-glass {
+  display: inline-flex; align-items: center; gap: 8px;
+  border-radius: 9999px; padding: 10px 18px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--lg-line-strong);
+  color: var(--lg-text);
+  font-family: var(--lg-font-mono); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  transition: background 0.2s, transform 0.2s;
+}
+.lg-btn-glass:hover { background: rgba(255, 255, 255, 0.12); transform: scale(1.02); }
+
+/* Dot-matrix status pill with a live LED. */
+.lg-pill {
+  display: inline-flex; align-items: center; gap: 8px;
+  border-radius: 9999px; padding: 6px 14px;
+  background: rgba(24, 24, 27, 0.8);
+  border: 1px solid var(--lg-line);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  font-family: var(--lg-font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--lg-muted);
+}
+.lg-led { width: 6px; height: 6px; border-radius: 9999px; background: var(--lg-lime); }
+.lg-led-blue { background: var(--lg-blue); }
+.lg-led-red { background: var(--lg-red); }
+.lg-led-pulse { animation: lg-pulse 1.8s ease-in-out infinite; }
+@keyframes lg-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(163, 230, 53, 0.8); opacity: 1; }
+  50% { box-shadow: 0 0 10px 2px rgba(163, 230, 53, 0.5); opacity: 0.7; }
+}
+
+/* ── Scroll effects ─────────────────────────────────────────────────────── */
+
+.reveal {
+  opacity: 0;
+  transform: translate3d(0, 28px, 0);
+  transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity, transform;
+}
+.reveal-shown { opacity: 1; transform: none; }
+
+/* From-the-side variants for variety down the page. */
+.reveal-left { transform: translate3d(-36px, 0, 0); }
+.reveal-right { transform: translate3d(36px, 0, 0); }
+
+.scroll-progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 2px;
+  z-index: 60; pointer-events: none;
+  background: rgba(255, 255, 255, 0.06);
+}
+.scroll-progress-fill {
+  height: 100%; width: 100%;
+  background: linear-gradient(90deg, var(--lg-lime), var(--lg-blue));
+  transform-origin: 0 50%;
+  transition: transform 0.08s linear;
+}
+
+/* Hero scroll cue. */
+.scroll-cue {
+  width: 1px; height: 44px; margin: 0 auto;
+  background: linear-gradient(180deg, var(--lg-lime), transparent);
+  animation: scroll-cue 2.2s ease-in-out infinite;
+}
+@keyframes scroll-cue {
+  0% { transform: scaleY(0); transform-origin: top; }
+  45% { transform: scaleY(1); transform-origin: top; }
+  55% { transform: scaleY(1); transform-origin: bottom; }
+  100% { transform: scaleY(0); transform-origin: bottom; }
+}
+
+/* ── Tabs, code, terminal ────────────────────────────────────────────────── */
+
+.lg-tab {
+  border-radius: 9999px; padding: 6px 14px;
+  font-family: var(--lg-font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--lg-muted); transition: all 0.2s;
+  border: 1px solid transparent;
+}
+.lg-tab:hover { color: var(--lg-text); background: rgba(255, 255, 255, 0.06); }
+.lg-tab[data-active="true"] {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--lg-line-strong);
+  color: var(--lg-text);
+  box-shadow: var(--lg-specular);
+}
+
+.lg-code {
+  font-family: var(--lg-font-mono);
+  font-size: 11px; line-height: 1.7;
+  color: var(--lg-muted);
+  white-space: pre; overflow-x: auto;
+  font-variant-numeric: tabular-nums;
+}
+.lg-code::-webkit-scrollbar { height: 6px; }
+.lg-code::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); border-radius: 3px; }
+
+/* Terminal feed rows. */
+.lg-term-row {
+  display: block; padding: 2px 0;
+  font-family: var(--lg-font-mono); font-size: 10px; line-height: 1.6;
+  letter-spacing: 0.02em;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+  animation: lg-row-in 0.3s ease-out;
+}
+@keyframes lg-row-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+
+/* ── Slider & toggle ────────────────────────────────────────────────────── */
+
+.lg-slider {
+  -webkit-appearance: none; appearance: none;
+  width: 100%; height: 6px; border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.08);
+  outline: none;
+}
+.lg-slider::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 20px; height: 20px; border-radius: 9999px;
+  background: var(--lg-lime);
+  border: 3px solid #09090b;
+  box-shadow: 0 0 0 1px rgba(163, 230, 53, 0.4), 0 0 12px rgba(163, 230, 53, 0.5);
+  cursor: pointer;
+}
+.lg-slider::-moz-range-thumb {
+  width: 20px; height: 20px; border-radius: 9999px;
+  background: var(--lg-lime); border: 3px solid #09090b; cursor: pointer;
+}
+
+.lg-switch {
+  position: relative; width: 44px; height: 24px; flex-shrink: 0;
+}
+.lg-switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+.lg-switch-track {
+  position: absolute; inset: 0; border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--lg-line);
+  transition: background 0.2s;
+}
+.lg-switch input:checked + .lg-switch-track { background: var(--lg-lime); }
+.lg-switch input:focus-visible + .lg-switch-track { outline: 2px solid var(--lg-lime); outline-offset: 2px; }
+.lg-switch-knob {
+  position: absolute; top: 3px; left: 3px; width: 18px; height: 18px;
+  border-radius: 9999px; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+.lg-switch input:checked ~ .lg-switch-knob { transform: translateX(20px); }
+
+/* ── Data tables ─────────────────────────────────────────────────────────── */
+
+.lg-table { width: 100%; text-align: left; border-collapse: collapse; }
+.lg-table th {
+  font-family: var(--lg-font-mono); font-size: 9px; font-weight: 700;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--lg-dim); padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--lg-line);
+}
+.lg-table td {
+  font-family: var(--lg-font-mono); font-size: 11px;
+  padding: 12px 12px 12px 0; color: var(--lg-muted);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  font-variant-numeric: tabular-nums;
+}
+.lg-table td strong { color: var(--lg-text); font-weight: 700; }
+
+/* ── Hero specular text ─────────────────────────────────────────────────── */
+
+.lg-hero-text {
+  font-family: var(--lg-font-display);
+  font-weight: 700; letter-spacing: -0.04em;
+  background: linear-gradient(90deg, #fafafa 0%, #e7f9c0 45%, var(--lg-lime) 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+
+.lg-grid-lines {
+  position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size: 24px 24px;
+  mask-image: radial-gradient(80% 70% at 50% 45%, black 20%, transparent 75%);
+  -webkit-mask-image: radial-gradient(80% 70% at 50% 45%, black 20%, transparent 75%);
+}
+
+/* The floating dock. */
+.lg-dock {
+  position: sticky; bottom: 18px; z-index: 40;
+  display: flex; justify-content: center; padding: 0 16px 12px;
+  pointer-events: none;
+}
+.lg-dock-inner {
+  pointer-events: auto;
+  display: inline-flex; align-items: center; gap: 14px;
+  border-radius: 9999px; padding: 8px 18px;
+  background: rgba(39, 39, 42, 0.85);
+  backdrop-filter: blur(24px) saturate(200%);
+  -webkit-backdrop-filter: blur(24px) saturate(200%);
+  border: 1px solid var(--lg-line-strong);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal { opacity: 1; transform: none; transition: none; }
+  .scroll-cue, .lg-led-pulse { animation: none; }
+  .reveal, .lg-dock-inner, .lg-btn-primary { transition: none; }
+}
+
+/* ── Auth console inputs (glass trench per the design system) ────────────── */
+
+.lg-input {
+  border-radius: 12px;
+  padding: 10px 14px;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--lg-line);
+  color: var(--lg-text);
+  font-family: var(--lg-font-body);
+  font-size: 14px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.lg-input::placeholder { color: var(--lg-dim); font-family: var(--lg-font-mono); font-size: 12px; }
+.lg-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.35);
+  box-shadow: 0 0 0 1px var(--lg-lime);
+}

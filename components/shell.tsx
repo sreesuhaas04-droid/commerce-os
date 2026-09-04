@@ -4,9 +4,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useState, useSyncExternalStore } from "react";
 import {
-  Activity, BadgeCheck, BarChart3, Boxes, Brain, Cpu, Gauge,
-  LineChart, Megaphone, Package, PackageCheck, ScrollText, Settings, ShieldCheck,
-  Sparkles, Truck, Users, Wallet,
+  Activity, BadgeCheck, BarChart3, Boxes, Brain, Cpu, Gauge, KeyRound,
+  LineChart, Megaphone, Orbit, Package, PackageCheck, ScrollText, Settings,
+  ShieldCheck, Sparkles, Truck, Users, Wallet,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 
@@ -15,6 +15,7 @@ const NAV: { group: string; items: { href: string; label: string; icon: typeof G
     group: "Operations",
     items: [
       { href: "/", label: "Command Center", icon: Gauge },
+      { href: "/showcase", label: "Agentic Showcase", icon: Orbit },
       { href: "/agents", label: "Agents", icon: Cpu },
       { href: "/goals", label: "Goals", icon: BadgeCheck },
       { href: "/approvals", label: "Approvals", icon: ShieldCheck },
@@ -36,6 +37,7 @@ const NAV: { group: string; items: { href: string; label: string; icon: typeof G
   {
     group: "System",
     items: [
+      { href: "/login", label: "Account & Keys", icon: KeyRound },
       { href: "/simulation", label: "Simulator", icon: Sparkles },
       { href: "/events", label: "Event Stream", icon: Activity },
       { href: "/audit", label: "Audit Log", icon: ScrollText },
