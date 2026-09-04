@@ -1,6 +1,14 @@
 import { z } from "zod";
 import { SCENARIOS, triggerScenario } from "@/simulation/scenarios";
-import { body, handle, ok, ready } from "@/lib/api";
+import {
+  body,
+  clientIp,
+  handle,
+  ok,
+  overRateLimit,
+  ready,
+  tooManyRequests,
+} from "@/lib/api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,6 +25,9 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    if (overRateLimit("api:events/simulate", clientIp(request))) {
+      return tooManyRequests("api:events/simulate");
+    }
     ready();
     const parsed = await body(request, Payload);
     if (parsed.error) return parsed.error;

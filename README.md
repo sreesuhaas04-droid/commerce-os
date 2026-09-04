@@ -1,14 +1,20 @@
 # Multi-Agent Commerce OS
 
-An operating layer for an online business, where eight specialised AI agents observe
-events, investigate with typed tools, collaborate on findings, and execute actions
-under a governance pipeline that decides — deterministically — what they may do alone
-and what needs a human.
+An operating layer for an online business, where **nine** specialised AI agents
+observe events, investigate with typed tools, collaborate on findings, and
+execute actions under a governance pipeline that decides — deterministically —
+what they may do alone and what needs a human.
 
-It is not a chatbot over a dashboard. Agents cannot touch the database; they can only
-call declared tools, and every tool call passes permission, policy, risk and budget
-checks before anything changes.
+It is not a chatbot over a dashboard. Agents cannot touch the database; they
+can only call declared tools, and every tool call passes permission, policy,
+risk and budget checks before anything changes.
 
+**The merchant is transactable by an AI buyer end to end.** An external buying
+agent reads `/agents.md` and `/api/catalog`, then transacts through
+`/api/checkout` — browse, cart, pay — where every money action goes through the
+same governance pipeline a refund or a purchase order does. Payments run on
+Razorpay **test mode** when credentials are set, and are simulated and labelled
+`TXN_DEMO_*` when they are not.
 ```bash
 git clone <repo> && cd commerce-os
 npm install
@@ -105,6 +111,7 @@ Full detail in [docs/architecture.md](docs/architecture.md).
 | **Customer** | Tickets, refunds, systemic signals | 3 | ₹20,000/day |
 | **Procurement** | Supplier selection, purchase orders | 2 | ₹50,000/day |
 | **Fulfilment** | Dropship handover, supplier exceptions | 3 | ₹1,00,000/day |
+| **Checkout** | Conversational checkout for AI buyers | 2 | — |
 
 Each has its own objective, system instructions, tool surface and permission set.
 Permissions are the source of truth — the governance pipeline reads them on every call,
@@ -219,7 +226,7 @@ native module to compile and no database server to run.
 | --- | --- |
 | `npm run dev` | Development server |
 | `npm run build` / `npm start` | Production build and serve |
-| `npm test` | 127 tests — governance, security, agents, scenarios, MCP, queue, fulfilment, the password gate |
+| `npm test` | 165 tests — governance, security, auth, agents, agentic commerce, scenarios, MCP, queue, fulfilment, the password gate |
 | `npm run typecheck` | Strict TypeScript, no `any` in domain code |
 | `npm run seed` | Seed if empty |
 | `npm run reset-demo` | Wipe and reseed to the exact starting state |
@@ -316,10 +323,62 @@ calls too — a client that only ever saw outputs could not tell a checked actio
 unchecked one. Calls are correlated under an `mcp_…` id, so the audit log distinguishes
 an external caller from an internal agent.
 
-`tools/list` returns only the bound agent's surface, with input schemas generated from the
-same Zod definitions the executor validates against, so the schema a client reads cannot
+`tools/list` returns only the bound agent's surface, with input schemas generated from
+the same Zod definitions the executor validates against, so the schema a client reads cannot
 drift from the schema enforced. There is no MCP SDK dependency: `initialize`,
 `tools/list`, `tools/call` and a line reader is less code than adding one.
+
+---
+
+## Agentic commerce: transactable by an AI buyer
+
+A buying agent can take this merchant from discovery to a paid cart with three
+HTTP calls, and every money action on that path is gated exactly like a human
+agent's:
+
+```
+GET  /agents.md          machine buyer guide (also served at /agents.md)
+GET  /api/catalog        agent-readable catalogue: id, price, availability
+POST /api/checkout       one buyer turn: browse | cart | confirm
+```
+
+**The catalogue is a shop window, not the books.** Cost, margin and supplier
+identity never appear in it — a buyer sees what a shopper in the shop sees.
+The same builder backs the internal `get_agent_catalog` tool, so the two
+cannot drift.
+
+**Checkout is conversational and typed.** A turn names its intent; the
+Checkout Agent serves it with grounded tool calls only — no invented products,
+no invented totals, no stock claims the catalogue does not support.
+
+**Every money action is gated.** Cart placement and payment confirmation both
+park for a human under the agent's autonomy level, carry the exact cart and
+total in the approval queue, and land in the audit log with their governance
+verdict. A cart above the ₹5,00,000 hard ceiling is denied before any payment
+order is created. A cart for more than is on the shelf is refused with a
+per-line breakdown — the failure handled gracefully. An already-paid order
+cannot be confirmed twice.
+
+**Payments run Razorpay test mode.** Set `RAZORPAY_KEY_ID`,
+`RAZORPAY_KEY_SECRET` and `RAZORPAY_TEST_MODE=1` (test keys only — the code
+refuses `rzp_live_*`) and payment orders are created on Razorpay's sandbox,
+where no real money can move. Unset, payment references are simulated and
+identified as `TXN_DEMO_*`. The integration implements orders and payment
+reads only: no settlement, no payout, no transfer.
+
+**Checkout is authenticated, and keys are scoped.** The machine-buyer money API
+requires a session (an operator at `/login`) or a Bearer API key. Keys carry
+exactly `catalog:read` + `checkout:write`, are shown once and stored as
+SHA-256 digests, and the `buyerId` of every turn is bound to the account
+behind the credential — a key cannot act as another buyer. Failed logins are
+rate-limited and audited; passwords are scrypt-hashed with per-account salt.
+Manage keys at **`/login`** (also linked in the sidebar as *Account & Keys*).
+
+**Upsell and campaign orchestration are grounded too.** The
+`draft_upsell_offers` tool proposes cross-sells from the real catalogue —
+same category, in stock, not already in the cart — and the growth plan
+template pairs Marketing's campaign ranking with the Checkout Agent's
+offers, so a campaign never carries an offer a buyer cannot transact.
 
 ---
 
@@ -467,16 +526,23 @@ Stated plainly, because a fake would violate the honesty rules above:
 - **Redis event bus.** `EventBus` is the seam; only the in-process bus ships.
 - **A2A and agent payment protocols.** `CommerceAdapter` is designed as the seam.
   Nothing claims to speak them today. MCP *is* implemented — see above — over stdio
-  only; there is no HTTP/SSE MCP transport.
-- **Real payment or ad-platform integration.** Both simulated and labelled.
+  only; there is no HTTP/SSE MCP transport. The AI-buyer surface below is a plain
+  JSON API an external agent calls over HTTP, not a named protocol — deliberately,
+  since UAP/ACP/x402 are all still moving.
+- **Real payment settlement.** Razorpay test mode creates payment orders and reads
+  payment status; no settlement, payout or transfer is implemented, and live keys
+  are refused by code. Ad-platform integration remains simulated and labelled.
 - **Confirming a Printful order.** The supplier integration is real and creates draft
   orders; the call that confirms one — the call that would cause production and a charge —
   is deliberately not implemented. See ADR-021.
 - **Shipping to the actual customer.** A live supplier receives a fixed operator address,
   because `SupplierOrderRequest` cannot carry customer data. A real dropshipping business
   would need that decision taken deliberately, against `SEC-001`.
-- **Authentication.** `DEMO_PASSWORD` is one shared password over HTTP Basic for public
-  deployments. There are no accounts and no roles, and it is not called auth.
+- **Authentication for the human console.** Accounts, sessions and scoped API
+  keys exist and gate the machine-buyer API (`/api/checkout`, `/api/auth/*`,
+  see `/login`); the operator console pages still sit behind the single shared
+  `DEMO_PASSWORD` gate, and that gate remains a demo gate, not an
+  authentication system.
 
 ---
 
@@ -487,6 +553,7 @@ Stated plainly, because a fake would violate the honesty rules above:
 | [docs/architecture.md](docs/architecture.md) | Layers, data flow, module boundaries |
 | [docs/agents.md](docs/agents.md) | Each agent's role, tools, permissions, reasoning |
 | [docs/security.md](docs/security.md) | Threat model, prompt injection, permissions |
+| [docs/security-review.md](docs/security-review.md) | The audit that found and fixed the loopholes |
 | [docs/policies.md](docs/policies.md) | Every rule and why it exists |
 | [docs/demo.md](docs/demo.md) | Presenter script |
 | [docs/decisions.md](docs/decisions.md) | Architecture decisions and what was rejected |

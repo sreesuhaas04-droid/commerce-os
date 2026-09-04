@@ -10,7 +10,15 @@ import { getTool, listTools } from "@/tools/definitions";
 import { AGENTS, AGENT_IDS } from "@/agents/definitions";
 import { untrusted } from "@/agents/runtime";
 import { seedDemo } from "@/simulation/seed";
-import { listAudit, listOrders, listProducts, listTickets } from "@/database/queries";
+import {
+  getInventoryItem,
+  getSupplierQuotes,
+  listAudit,
+  listOrders,
+  listProducts,
+  listTickets,
+} from "@/database/queries";
+import { getDb } from "@/database/db";
 import { newCorrelationId } from "@/lib/ids";
 import type { AgentId, ToolContext } from "@/types";
 
@@ -198,5 +206,153 @@ describe("auditability", () => {
       expect(entry.correlationId).toBeTruthy();
       expect(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).toContain(entry.risk);
     }
+  });
+});
+
+describe("refund idempotency", () => {
+  it("refuses a second refund on an order that is already refunded", async () => {
+    const order = listOrders(200).find((o) => o.paymentStatus === "SUCCESS")!;
+    const first = await callTool(
+      "create_refund",
+      { orderId: order.id, amountPaise: 100_00, reason: "first refund" },
+      ctx("customer"),
+    );
+    expect(first.status).toBe("COMPLETED");
+
+    // A second refund with a different amount and reason — the shape two
+    // separate plans would produce — must not move money a second time.
+    const second = await callTool(
+      "create_refund",
+      { orderId: order.id, amountPaise: 200_00, reason: "second attempt" },
+      { ...ctx("customer"), approvalId: "apr_test_refund_2" },
+    );
+    expect(second.status).toBe("FAILED");
+    expect(second.error).toMatch(/already been refunded/);
+  });
+
+  it("never hands an unpaid or refunded order to the supplier", async () => {
+    const refunded = listOrders(200).find((o) => o.paymentStatus === "REFUNDED");
+    if (refunded) {
+      const result = await callTool(
+        "fulfill_order",
+        { orderId: refunded.id, reason: "should not ship" },
+        { ...ctx("fulfillment"), approvalId: "apr_test_ful_refunded" },
+      );
+      expect(result.status).toBe("FAILED");
+    }
+
+    const cancelled = listOrders(200).find(
+      (o) => o.status === "CANCELLED" && o.paymentStatus === "SUCCESS",
+    );
+    if (cancelled) {
+      const result = await callTool(
+        "fulfill_order",
+        { orderId: cancelled.id, reason: "should not ship" },
+        { ...ctx("fulfillment"), approvalId: "apr_test_ful_cancelled" },
+      );
+      expect(result.status).toBe("FAILED");
+    }
+  });
+});
+
+describe("daily budget rollover", () => {
+  it("resets an agent's daily spend when the day changes", async () => {
+    const db = getDb();
+    const { getAgentBudget } = await import("@/database/queries");
+
+    // Prime the rollover for today, so the next reads exercise the steady
+    // state — yesterday's spend visible, no reset yet.
+    getAgentBudget("customer");
+    db.run(`UPDATE agents SET budget_used_paise = ? WHERE id = ?`, 9_000_00, "customer");
+
+    const before = getAgentBudget("customer");
+    expect(before.usedPaise).toBe(9_000_00);
+
+    // A stale rollover day makes the next read treat the day as new and clear
+    // the counters — the behaviour a real midnight crossing produces.
+    db.run(
+      `INSERT INTO system_state (key, value) VALUES ('budget_rollover_day', '2000-01-01')
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    );
+    const after = getAgentBudget("customer");
+    expect(after.usedPaise).toBe(0);
+    expect(after.limitPaise).toBe(before.limitPaise);
+  });
+
+  it("does not reset twice within the same day", async () => {
+    const { getAgentBudget, chargeBudget } = await import("@/database/queries");
+
+    getAgentBudget("customer"); // rollover runs; today is recorded
+    chargeBudget("customer", 500_00);
+    getAgentBudget("customer"); // same day — no second reset
+    const budget = getAgentBudget("customer");
+    expect(budget.usedPaise).toBe(500_00);
+  });
+});
+
+describe("purchase order receipt", () => {
+  it("refuses to receive a purchase order twice, so stock cannot be minted", async () => {
+    const quotes = getSupplierQuotes("prd_001");
+    if (quotes.length === 0) return;
+    const placed = await callTool(
+      "create_purchase_order",
+      {
+        productId: "prd_001",
+        supplierId: quotes[0].supplierId,
+        quantity: quotes[0].minimumOrderQuantity,
+        reason: "restock",
+      },
+      { ...ctx("procurement"), approvalId: "apr_test_po_1" },
+    );
+    if (placed.status !== "COMPLETED") return;
+    const poId = (placed.output as { id: string }).id;
+
+    const first = await callTool(
+      "receive_purchase_order",
+      {
+        purchaseOrderId: poId,
+        productId: "prd_001",
+        quantity: quotes[0].minimumOrderQuantity,
+      },
+      ctx("inventory"),
+    );
+    expect(first.status).toBe("COMPLETED");
+
+    const before = getInventoryItem("prd_001")!.onHand;
+    const second = await callTool(
+      "receive_purchase_order",
+      {
+        purchaseOrderId: poId,
+        productId: "prd_001",
+        quantity: quotes[0].minimumOrderQuantity,
+      },
+      ctx("inventory"),
+    );
+    expect(second.status).toBe("FAILED");
+    expect(getInventoryItem("prd_001")!.onHand).toBe(before);
+  });
+
+  it("refuses a receipt whose quantity does not match the order", async () => {
+    const quotes = getSupplierQuotes("prd_002");
+    if (quotes.length === 0) return;
+    const placed = await callTool(
+      "create_purchase_order",
+      {
+        productId: "prd_002",
+        supplierId: quotes[0].supplierId,
+        quantity: quotes[0].minimumOrderQuantity,
+        reason: "restock",
+      },
+      { ...ctx("procurement"), approvalId: "apr_test_po_2" },
+    );
+    if (placed.status !== "COMPLETED") return;
+    const poId = (placed.output as { id: string }).id;
+
+    const inflated = await callTool(
+      "receive_purchase_order",
+      { purchaseOrderId: poId, productId: "prd_002", quantity: quotes[0].minimumOrderQuantity * 10 },
+      ctx("inventory"),
+    );
+    expect(inflated.status).toBe("FAILED");
   });
 });

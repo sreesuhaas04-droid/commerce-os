@@ -18,8 +18,9 @@ import "@/integrations/fulfillment-worker";
 import { getDb } from "@/database/db";
 import { seedDemo } from "@/simulation/seed";
 import { getAgentImpl } from "@/agents";
-import { listOrders, listTickets } from "@/database/queries";
+import { getOrder, listOrders, listTickets } from "@/database/queries";
 import { newCorrelationId } from "@/lib/ids";
+import { rupees } from "@/lib/money";
 import type { AgentId, Order, ToolContext } from "@/types";
 
 const ctx = (agentId: AgentId): ToolContext => ({
@@ -27,6 +28,9 @@ const ctx = (agentId: AgentId): ToolContext => ({
   taskId: null,
   correlationId: newCorrelationId(),
 });
+
+/** The customer agent's reply batch size — only these tickets get answered in a run. */
+const REPLY_BATCH = 6;
 
 const paidOrder = (): Order => listOrders(200).find((o) => o.paymentStatus === "SUCCESS")!;
 
@@ -140,15 +144,33 @@ describe("replies the agent actually sends", () => {
   });
 
   it("tells a customer the real state of an order that is with the supplier", async () => {
-    const ticket = listTickets().find((t) => t.orderId)!;
+    // A delivery-themed ticket whose order is paid and under the ₹50,000
+    // fulfilment auto-approval limit — the supplier reference appears in the
+    // delivery reply template, so any other theme would answer honestly
+    // without ever quoting it. Earlier tests in this file have answered the
+    // whole queue, so the ticket is taken from any status and reopened.
+    const ticket = listTickets()
+      .find((t) => {
+        if (!t.orderId) return false;
+        if (!/\b(ship|delivery|tracking|arriv)/i.test(`${t.subject} ${t.body}`)) return false;
+        const order = getOrder(t.orderId);
+        return order?.paymentStatus === "SUCCESS" && order.costPaise <= rupees(50_000);
+      })!;
+    expect(ticket, "a delivery-themed ticket with a paid, small order must exist").toBeTruthy();
     await callTool(
       "fulfill_order",
       { orderId: ticket.orderId!, reason: "handover" },
       ctx("fulfillment"),
     );
     await runDueJobs();
-    // Reopen it so this run answers it again, now that state exists.
+    // Reopen it and clear any earlier reply, then force it into this run's
+    // reply batch by closing everything else — the agent answers the first six
+    // open tickets, and the batch must contain this one deterministically.
     getDb().run(`UPDATE tickets SET status = 'OPEN', reply = NULL WHERE id = ?`, ticket.id);
+    getDb().run(
+      `UPDATE tickets SET status = 'ANSWERED' WHERE id != ? AND status = 'OPEN'`,
+      ticket.id,
+    );
 
     await getAgentImpl("customer").run({
       correlationId: newCorrelationId(),

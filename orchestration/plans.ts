@@ -149,6 +149,36 @@ export const PLAN_TEMPLATES: PlanTemplate[] = [
       },
     ],
   },
+  {
+    id: "ai_buyer_checkout",
+    title: "Serve an AI buyer end to end",
+    // Fired by the checkout tool when a machine cart is placed. Deliberately
+    // small: one agent serves the buyer under its own governance, and the CEO
+    // reviews the position afterwards.
+    triggers: ["MACHINE_ORDER_CREATED"],
+    metrics: [],
+    intents: ["ai buyer", "machine order", "checkout", "conversational checkout"],
+    tasks: [
+      { key: "serve", agentId: "checkout", title: "Review the buyer's cart position", dependsOn: [] },
+      { key: "decide", agentId: "ceo", title: "Review the machine-order position", dependsOn: ["serve"] },
+    ],
+  },
+  {
+    id: "upsell_campaign",
+    title: "Grow the basket: upsell and campaign orchestration",
+    triggers: ["CAMPAIGN_PERFORMANCE_CHANGED"],
+    metrics: ["repeat_rate"],
+    intents: ["upsell", "cross-sell", "grow revenue", "basket"],
+    tasks: [
+      // Marketing finds where demand is already flowing cheaply...
+      { key: "campaigns", agentId: "marketing", title: "Rank campaigns by return", dependsOn: [] },
+      // ...and the checkout agent drafts cross-sell offers from the real
+      // catalogue for the categories that convert, so the offers a campaign
+      // carries are ones a buyer can actually transact.
+      { key: "offers", agentId: "checkout", title: "Draft grounded cross-sell offers", dependsOn: ["campaigns"] },
+      { key: "decide", agentId: "ceo", title: "Decide the growth position", dependsOn: ["campaigns", "offers"] },
+    ],
+  },
 ];
 
 const DEFAULT_TEMPLATE = PLAN_TEMPLATES.find((t) => t.id === "full_business_review")!;

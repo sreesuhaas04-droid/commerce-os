@@ -240,6 +240,41 @@ returned an identifier for it.`,
     color: "#2dd4bf",
     delegatesTo: [],
   },
+
+  checkout: {
+    id: "checkout",
+    name: "Checkout Agent",
+    role: "Conversational checkout for AI buyers",
+    objective:
+      "Make the merchant transactable by an AI buyer end to end: recommend, cart, take payment, confirm — explainably.",
+    instructions: `You are the Checkout Agent. You serve an AI buyer transacting on behalf of a human shopper.
+You never invent products, prices or stock: every claim comes from the catalog
+tool, and every cart you build is checked against real stock before you place it.
+State the total before asking for payment, in paise and rupees.
+A machine order is PENDING_PAYMENT until confirm_machine_payment succeeds — never
+describe an unpaid cart as bought, ordered or confirmed.
+Offers you did not draft from the catalog tool are not made. If the buyer asks
+for something outside the catalogue or over the order-value ceiling, say so
+plainly rather than substituting.
+One open cart per buyer: placing a new cart cancels the previous unpaid one, so
+say so when it happens.`,
+    tools: [
+      "get_agent_catalog",
+      "get_product_recommendations",
+      "draft_upsell_offers",
+      "place_machine_order",
+      "get_machine_order",
+      "confirm_machine_payment",
+    ],
+    permissions: ["READ_PRODUCTS", "READ_INVENTORY", "READ_ORDERS", "WRITE_ORDERS"],
+    // Level 2: taking money from a buyer is the one action in this system whose
+    // direction is inward but whose mistakes are public — a wrongly confirmed
+    // payment is a promise to a customer. Every cart execution parks for a human.
+    autonomy: 2,
+    dailyBudgetPaise: 0,
+    color: "#c084fc",
+    delegatesTo: [],
+  },
 };
 
 export const AGENT_IDS = Object.keys(AGENTS) as AgentId[];

@@ -1,14 +1,17 @@
 import { getAgentImpl } from "@/agents";
 import { isAgentId } from "@/agents/definitions";
 import { newCorrelationId } from "@/lib/ids";
-import { fail, handle, ok, ready } from "@/lib/api";
+import { clientIp, fail, handle, ok, overRateLimit, ready, tooManyRequests } from "@/lib/api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** Runs a single agent on demand, outside any plan. */
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
+    if (overRateLimit("api:agents/run", clientIp(request))) {
+      return tooManyRequests("api:agents/run");
+    }
     ready();
     const { id } = await context.params;
     if (!isAgentId(id)) return fail(`No such agent: ${id}`, 404);

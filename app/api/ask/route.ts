@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { planForQuestion, runPlan } from "@/orchestration/orchestrator";
-import { body, handle, ok, ready } from "@/lib/api";
+import { body, clientIp, handle, ok, overRateLimit, ready, tooManyRequests } from "@/lib/api";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +10,7 @@ const Payload = z.object({ question: z.string().min(3).max(400) });
 /** Free-text entry point: "why did sales drop yesterday?" */
 export async function POST(request: Request) {
   try {
+    if (overRateLimit("api:ask", clientIp(request))) return tooManyRequests("api:ask");
     ready();
     const parsed = await body(request, Payload);
     if (parsed.error) return parsed.error;
