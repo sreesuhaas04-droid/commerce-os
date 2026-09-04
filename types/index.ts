@@ -16,7 +16,8 @@ export type AgentId =
   | "marketing"
   | "customer"
   | "procurement"
-  | "fulfillment";
+  | "fulfillment"
+  | "checkout";
 
 export type AgentStatus = "IDLE" | "THINKING" | "WORKING" | "WAITING" | "ERROR";
 
@@ -73,7 +74,8 @@ export type Permission =
   | "WRITE_CAMPAIGNS"
   | "WRITE_TICKETS"
   | "WRITE_PLANS"
-  | "WRITE_FULFILLMENT";
+  | "WRITE_FULFILLMENT"
+  | "WRITE_ORDERS";;
 
 // ─── Governance ──────────────────────────────────────────────────────────────
 
@@ -170,6 +172,9 @@ export type EventType =
   | "FULFILLMENT_SUBMITTED"
   | "FULFILLMENT_FAILED"
   | "FULFILLMENT_DEAD_LETTERED"
+  // An AI buyer placed a machine cart. Distinct from ORDER_CREATED, which the
+  // fulfilment plan owns and which means a paid human order.
+  | "MACHINE_ORDER_CREATED"
   // Internal lifecycle events, used by the live UI.
   | "AGENT_STATUS_CHANGED"
   | "AGENT_MESSAGE"

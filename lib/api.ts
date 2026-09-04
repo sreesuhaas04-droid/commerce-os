@@ -70,3 +70,73 @@ export function intParam(request: Request, key: string, fallback: number): numbe
   const value = raw ? Number.parseInt(raw, 10) : NaN;
   return Number.isFinite(value) ? value : fallback;
 }
+
+// ─── Rate limiting ────────────────────────────────────────────────────────────
+
+/**
+ * A fixed-window limiter for the routes that run plans or hit a model.
+ *
+ * This console is one shared password wide open, and the routes that run the
+ * full eight-agent pipeline on a request are the ones a stuck client — a
+ * retry loop, a held-open demo tab, or a script with the password — can turn
+ * into a self-inflicted denial of service. The limits are per IP per window,
+ * which is the granularity a demo gate can honestly support: there are no
+ * accounts, so there is nothing finer to key on.
+ *
+ * In-process, like everything else here (single instance is a deployment
+ * requirement). One map of windows pinned to globalThis so dev recompiles do
+ * not fork the counters.
+ */
+const RATE_LIMITS: Record<string, { limit: number; windowMs: number }> = {
+  // A full plan run is 5–8 agent runs; 20 within a minute is a loop, not a user.
+  "api:ask": { limit: 20, windowMs: 60_000 },
+  "api:agents/run": { limit: 30, windowMs: 60_000 },
+  "api:events/simulate": { limit: 20, windowMs: 60_000 },
+  // Credential endpoints: a tight budget, because brute force is the threat
+  // model here, not load. 10 login attempts a minute is generous for a human
+  // and hopeless for a script.
+  "api:login": { limit: 10, windowMs: 60_000 },
+  "api:signup": { limit: 5, windowMs: 60_000 },
+};
+
+const rateRef = globalThis as unknown as {
+  __commerceRateWindows?: Map<string, { start: number; count: number }>;
+};
+
+/** True when the request is over its limit; the caller returns 429. */
+export function overRateLimit(bucket: keyof typeof RATE_LIMITS, ip: string): boolean {
+  const rule = RATE_LIMITS[bucket];
+  rateRef.__commerceRateWindows ??= new Map();
+  const windows = rateRef.__commerceRateWindows;
+  const key = `${bucket}:${ip}`;
+  const now = Date.now();
+
+  let window = windows.get(key);
+  if (!window || now - window.start >= rule.windowMs) {
+    window = { start: now, count: 0 };
+    windows.set(key, window);
+  }
+  window.count += 1;
+
+  if (windows.size > 5000) {
+    for (const [key, w] of windows) if (now - w.start >= rule.windowMs) windows.delete(key);
+  }
+
+  return window.count > rule.limit;
+}
+
+/** Best-effort client IP — behind a proxy the platform's header wins. */
+export function clientIp(request: Request): string {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) return forwarded.split(",")[0]!.trim();
+  return "local";
+}
+
+/** A 429 with a Retry-After the caller can use directly. */
+export function tooManyRequests(bucket: string): NextResponse {
+  const retryAfter = Math.ceil((RATE_LIMITS[bucket]?.windowMs ?? 60_000) / 1000);
+  return NextResponse.json(
+    { error: `Too many requests to ${bucket}. Retry in ${retryAfter}s.` },
+    { status: 429, headers: { "retry-after": String(retryAfter) } },
+  );
+}

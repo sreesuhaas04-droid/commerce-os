@@ -336,6 +336,72 @@ CREATE TABLE IF NOT EXISTS fulfillments (
 CREATE INDEX IF NOT EXISTS idx_fulfillments_order ON fulfillments(order_id);
 CREATE INDEX IF NOT EXISTS idx_fulfillments_status ON fulfillments(status);
 
+-- AI-buyer orders. Separate from the orders table, whose vocabulary feeds the
+-- revenue arithmetic: a machine cart starts as PENDING_PAYMENT intent and
+-- becomes PAID only on a confirmed payment. One open cart per buyer; a new cart
+-- cancels the previous unpaid one. processor_order_id is the payments gateway's
+-- reference (TXN_DEMO_* when simulated), and payment_simulated mirrors the gateway.
+CREATE TABLE IF NOT EXISTS machine_orders (
+  id                 TEXT PRIMARY KEY,
+  buyer_id           TEXT NOT NULL,
+  status             TEXT NOT NULL,
+  total_paise        INTEGER NOT NULL,
+  processor_order_id TEXT,
+  payment_simulated  INTEGER NOT NULL DEFAULT 1,
+  created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_machine_orders_buyer ON machine_orders(buyer_id, status);
+
+CREATE TABLE IF NOT EXISTS machine_order_lines (
+  order_id        TEXT NOT NULL REFERENCES machine_orders(id) ON DELETE CASCADE,
+  product_id      TEXT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+  quantity        INTEGER NOT NULL,
+  unit_price_paise INTEGER NOT NULL,
+  PRIMARY KEY (order_id, product_id)
+);
+
+-- ─── Accounts, sessions, API keys ────────────────────────────────────────────
+-- The console's own users, replacing the single shared DEMO_PASSWORD for the
+-- money APIs. Passwords are scrypt-hashed with per-user salt; sessions are
+-- opaque random tokens (never the password); API keys are shown once and
+-- stored only as SHA-256 so a database leak cannot mint a working key.
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id            TEXT PRIMARY KEY,
+  email         TEXT NOT NULL UNIQUE,
+  name          TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'operator',
+  password_hash TEXT NOT NULL,           -- scrypt: salt$hash, both hex
+  created_at    TEXT NOT NULL,
+  last_login_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id         TEXT PRIMARY KEY,            -- opaque random token
+  account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_seen_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_account ON sessions(account_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+
+-- Bearer keys for AI buyers and integrations. The plaintext key exists only
+-- in the one HTTP response that created it; the row keeps the SHA-256 digest.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id          TEXT PRIMARY KEY,
+  account_id  TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  label       TEXT NOT NULL,
+  key_hash    TEXT NOT NULL UNIQUE,       -- sha256 hex of the full key
+  prefix      TEXT NOT NULL,              -- first 12 chars, for display
+  scopes      TEXT NOT NULL DEFAULT '[]', -- JSON array
+  created_at  TEXT NOT NULL,
+  last_used_at TEXT,
+  revoked_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_api_keys_account ON api_keys(account_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys(key_hash);
+
 -- The queue is a table, not a broker: one process, one writer, and jobs that
 -- survive a restart — which is what a Redis-less deployment needs. run_after
 -- carries the backoff; a job is invisible until it passes.
@@ -358,6 +424,11 @@ CREATE INDEX IF NOT EXISTS idx_job_queue_due ON job_queue(status, run_after);
 export const RESET_ORDER = [
   "job_queue",
   "fulfillments",
+  "api_keys",
+  "sessions",
+  "accounts",
+  "machine_order_lines",
+  "machine_orders",
   "audit_logs",
   "approvals",
   "tasks",

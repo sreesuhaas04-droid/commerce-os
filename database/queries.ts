@@ -344,6 +344,18 @@ export function listPurchaseOrders(limit = 50): PurchaseOrder[] {
     }));
 }
 
+/** Marks a placed or delayed PO received, once — the stock credit rides with the caller. */
+export function markPurchaseOrderReceived(purchaseOrderId: string): void {
+  const result = getDb().run(
+    `UPDATE purchase_orders SET status = 'RECEIVED'
+      WHERE id = ? AND status IN ('PLACED', 'DELAYED')`,
+    purchaseOrderId,
+  );
+  if (result.changes === 0) {
+    throw new Error(`Purchase order ${purchaseOrderId} is not awaiting receipt`);
+  }
+}
+
 // ─── Orders, customers, tickets ──────────────────────────────────────────────
 
 export function listOrders(limit = 100): Order[] {
@@ -411,10 +423,28 @@ export function answerTicket(ticketId: string, reply: string, escalate: boolean)
   return result.changes > 0;
 }
 
+/**
+ * Marks an order refunded exactly once.
+ *
+ * The refund tool's business validation checks the amount against the order
+ * total, but nothing checked the payment status: an order already refunded
+ * could be refunded again by a second approved request (the executor's
+ * duplicate-approval guard keys on the entity, and two agents or two plans can
+ * reach the same order with different amounts or reasons). Charging the
+ * customer's refund twice is the one mistake here that moves money, so the
+ * write itself refuses it.
+ */
 export function recordRefund(orderId: string, amountPaise: number): string {
   const id = `TXN_DEMO_${Math.abs(hash(orderId + amountPaise)) % 100000}`;
-  getDb().transaction(() => {
-    getDb().run(
+  const db = getDb();
+  const changed = db.transaction(() => {
+    const claim = db.run(
+      `UPDATE orders SET payment_status = 'REFUNDED'
+        WHERE id = ? AND payment_status IN ('SUCCESS', 'FAILED')`,
+      orderId,
+    );
+    if (claim.changes === 0) return false;
+    db.run(
       `INSERT INTO payments (id, order_id, amount_paise, status, simulated, created_at)
        VALUES (?, ?, ?, 'REFUNDED', 1, ?)`,
       id,
@@ -422,8 +452,11 @@ export function recordRefund(orderId: string, amountPaise: number): string {
       -amountPaise,
       new Date().toISOString(),
     );
-    getDb().run(`UPDATE orders SET payment_status = 'REFUNDED' WHERE id = ?`, orderId);
+    return true;
   });
+  if (!changed) {
+    throw new Error(`Order ${orderId} has already been refunded — no second refund was issued.`);
+  }
   return id;
 }
 
@@ -735,6 +768,7 @@ export function getAgentRow(agentId: AgentId) {
 }
 
 export function getAgentBudget(agentId: AgentId): { limitPaise: number; usedPaise: number } {
+  rolloverBudgets();
   const row = getDb().get<{ daily_budget_paise: number; budget_used_paise: number }>(
     `SELECT daily_budget_paise, budget_used_paise FROM agents WHERE id = ?`,
     agentId,
@@ -746,11 +780,39 @@ export function getAgentBudget(agentId: AgentId): { limitPaise: number; usedPais
 }
 
 export function chargeBudget(agentId: AgentId, amountPaise: number): void {
+  rolloverBudgets();
   getDb().run(
     `UPDATE agents SET budget_used_paise = budget_used_paise + ? WHERE id = ?`,
     amountPaise,
     agentId,
   );
+}
+
+/**
+ * Resets daily spend when the day has changed.
+ *
+ * `budget_used_paise` is the "daily" budget counter, but nothing ever reset it:
+ * on the second day an agent had already spent its full authority the day
+ * before, so every action parked for a human — and after enough days, every
+ * action from every spending agent, permanently. The fix reads the day the
+ * counters were last zeroed from `system_state` and clears them once per
+ * calendar day. Idempotent within a day: a second call in the same day writes
+ * nothing.
+ */
+function rolloverBudgets(): void {
+  const db = getDb();
+  const today = new Date().toISOString().slice(0, 10);
+  const last = getState("budget_rollover_day");
+  if (last === today) return;
+
+  db.transaction(() => {
+    // Re-check inside the transaction so two concurrent calls cannot both roll
+    // over — the second sees the day the first just wrote and stops.
+    const inFlight = getState("budget_rollover_day");
+    if (inFlight === today) return;
+    db.run(`UPDATE agents SET budget_used_paise = 0`);
+    setState("budget_rollover_day", today);
+  });
 }
 
 export function bumpAgentMetrics(
@@ -1185,6 +1247,159 @@ export function getOrderLines(orderId: string): { sku: string; quantity: number 
       WHERE oi.order_id = ?`,
     orderId,
   );
+}
+
+// ─── Machine orders (AI buyers) ───────────────────────────────────────────────
+
+export interface MachineOrderLine {
+  productId: string;
+  quantity: number;
+  unitPricePaise: number;
+}
+
+export interface MachineOrder {
+  id: string;
+  buyerId: string;
+  status: "PENDING_PAYMENT" | "PAID" | "CANCELLED";
+  totalPaise: number;
+  lines: MachineOrderLine[];
+  processorOrderId: string | null;
+  paymentSimulated: boolean;
+  createdAt: string;
+}
+
+/**
+ * Places a machine order as `PENDING_PAYMENT` and creates the payment order
+ * on the gateway. No stock is reserved, no fulfilment starts and no revenue is
+ * recognised until the payment is confirmed — a buyer's cart is intent, not a
+ * completed sale, and the system treats it that way.
+ *
+ * Idempotent per buyer: one open cart at a time. A second request replaces the
+ * previous pending order (cancelling its un-paid payment order) rather than
+ * accumulating carts per buyer — the same shape as a storefront session.
+ */
+export function createMachineOrder(input: {
+  buyerId: string;
+  lines: { productId: string; quantity: number }[];
+  processorOrderId: string;
+  paymentSimulated: boolean;
+}): MachineOrder {
+  const db = getDb();
+  return db.transaction(() => {
+    // Cancel any previous unpaid cart from this buyer.
+    const open = db.all<{ id: string }>(
+      `SELECT id FROM machine_orders WHERE buyer_id = ? AND status = 'PENDING_PAYMENT'`,
+      input.buyerId,
+    );
+    for (const row of open) {
+      db.run(
+        `UPDATE machine_orders SET status = 'CANCELLED' WHERE id = ?`,
+        row.id,
+      );
+    }
+
+    const productIds = input.lines.map((l) => l.productId);
+    const rows = productIds.length
+      ? db.all<{ id: string; price_paise: number }>(
+          `SELECT id, price_paise FROM products WHERE id IN (${productIds.map(() => "?").join(",")})`,
+          ...productIds,
+        )
+      : [];
+    const priceById = new Map(rows.map((r) => [str(r.id), num(r.price_paise)]));
+    for (const line of input.lines) {
+      if (!priceById.has(line.productId)) {
+        throw new Error(`Unknown product ${line.productId} in the cart`);
+      }
+    }
+
+    const lines: MachineOrderLine[] = input.lines.map((l) => ({
+      productId: l.productId,
+      quantity: l.quantity,
+      unitPricePaise: priceById.get(l.productId)!,
+    }));
+    const totalPaise = lines.reduce((sum, l) => sum + l.unitPricePaise * l.quantity, 0);
+
+    const now = new Date().toISOString();
+    const id = `mord_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+    db.run(
+      `INSERT INTO machine_orders (id, buyer_id, status, total_paise, processor_order_id,
+          payment_simulated, created_at) VALUES (?, ?, 'PENDING_PAYMENT', ?, ?, ?, ?)`,
+      id, input.buyerId, totalPaise, input.processorOrderId,
+      input.paymentSimulated ? 1 : 0, now,
+    );
+    for (const line of lines) {
+      db.run(
+        `INSERT INTO machine_order_lines (order_id, product_id, quantity, unit_price_paise)
+         VALUES (?, ?, ?, ?)`,
+        id, line.productId, line.quantity, line.unitPricePaise,
+      );
+    }
+    return getMachineOrder(id)!;
+  });
+}
+
+export function getMachineOrder(id: string): MachineOrder | null {
+  const db = getDb();
+  const row = db.get(`SELECT * FROM machine_orders WHERE id = ?`, id);
+  if (!row) return null;
+  const lines = db
+    .all(`SELECT * FROM machine_order_lines WHERE order_id = ?`, id)
+    .map((l) => ({
+      productId: str(l.product_id),
+      quantity: num(l.quantity),
+      unitPricePaise: num(l.unit_price_paise),
+    }));
+  return {
+    id: str(row.id),
+    buyerId: str(row.buyer_id),
+    status: str(row.status) as MachineOrder["status"],
+    totalPaise: num(row.total_paise),
+    lines,
+    processorOrderId: row.processor_order_id ? str(row.processor_order_id) : null,
+    paymentSimulated: Boolean(num(row.payment_simulated)),
+    createdAt: str(row.created_at),
+  };
+}
+
+export function listMachineOrders(limit = 50): MachineOrder[] {
+  const db = getDb();
+  return db
+    .all(`SELECT id FROM machine_orders ORDER BY created_at DESC LIMIT ?`, limit)
+    .map((r) => getMachineOrder(str(r.id))!)
+    .filter(Boolean);
+}
+
+/** Confirms payment on a machine order — the only transition into PAID. */
+export function markMachineOrderPaid(id: string, paymentReference: string): MachineOrder {
+  const db = getDb();
+  const changed = db.run(
+    `UPDATE machine_orders SET status = 'PAID', processor_order_id = ?
+      WHERE id = ? AND status = 'PENDING_PAYMENT'`,
+    paymentReference,
+    id,
+  );
+  if (changed.changes === 0) {
+    throw new Error(`Machine order ${id} is not awaiting payment`);
+  }
+  return getMachineOrder(id)!;
+}
+
+/** Stock required to serve a cart, against what is actually on the shelf. */
+export function checkCartStock(lines: { productId: string; quantity: number }[]): {
+  productId: string;
+  sku: string;
+  requested: number;
+  onHand: number;
+}[] {
+  return lines.map((line) => {
+    const item = getInventoryItem(line.productId);
+    return {
+      productId: line.productId,
+      sku: item?.sku ?? line.productId,
+      requested: line.quantity,
+      onHand: item?.onHand ?? 0,
+    };
+  });
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────

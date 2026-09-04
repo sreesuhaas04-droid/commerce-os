@@ -10,7 +10,9 @@ import { z } from "zod";
 import {
   adjustStock,
   answerTicket,
+  checkCartStock,
   createFulfillment,
+  createMachineOrder,
   createPurchaseOrder,
   forecastDemand,
   getBusinessSummary,
@@ -20,6 +22,7 @@ import {
   getDailyMetrics,
   getFulfillmentForOrder,
   getInventoryItem,
+  getMachineOrder,
   getOrder,
   getProduct,
   getRevenueDecomposition,
@@ -30,7 +33,10 @@ import {
   listFulfillments,
   listOrders,
   listProducts,
+  listPurchaseOrders,
   listTickets,
+  markMachineOrderPaid,
+  markPurchaseOrderReceived,
   recordRefund,
   rememberFact,
   round,
@@ -42,7 +48,9 @@ import {
 import { recommendProducts } from "@/memory/vector";
 import { enqueue } from "@/events/queue";
 import { getSupplier } from "@/integrations/supplier";
+import { getPayments } from "@/integrations/payments";
 import { FULFILLMENT_JOB } from "@/integrations/fulfillment-worker";
+import { POLICY_LIMITS } from "@/policies/rules";
 import { formatMoney, marginPct, pct } from "@/lib/money";
 import { newId } from "@/lib/ids";
 import type { Fulfillment, Order, ToolDefinition } from "@/types";
@@ -553,6 +561,9 @@ const createRefundTool = define({
   execute: ({ orderId, amountPaise, reason }) => {
     const order = getOrder(orderId);
     if (!order) throw new Error(`Unknown order ${orderId}`);
+    if (order.paymentStatus === "REFUNDED") {
+      throw new Error(`Order ${orderId} has already been refunded.`);
+    }
     if (amountPaise > order.totalPaise) {
       throw new Error(
         `Refund ${formatMoney(amountPaise)} exceeds the order total ${formatMoney(order.totalPaise)}`,
@@ -626,17 +637,38 @@ const createPurchaseOrderTool = define({
 
 const receivePurchaseOrderTool = define({
   name: "receive_purchase_order",
-  description: "Marks a purchase order as received and credits the stock.",
+  description: "Marks a purchase order as received and credits the stock. One order is received once.",
   input: z.object({ purchaseOrderId: z.string(), productId: z.string(), quantity: z.number().int().positive() }),
   output: z.any(),
   permission: "WRITE_INVENTORY",
   risk: "LOW",
   mutates: true,
-  execute: ({ purchaseOrderId, productId, quantity }) => ({
-    purchaseOrderId,
-    productId,
-    onHand: adjustStock(productId, quantity),
-  }),
+  execute: ({ purchaseOrderId, productId, quantity }) => {
+    const po = listPurchaseOrders(200).find((p) => p.id === purchaseOrderId);
+    if (!po) throw new Error(`Unknown purchase order ${purchaseOrderId}`);
+    if (po.productId !== productId) {
+      throw new Error(
+        `Purchase order ${purchaseOrderId} is for product ${po.productId}, not ${productId}`,
+      );
+    }
+    if (po.quantity !== quantity) {
+      throw new Error(
+        `Purchase order ${purchaseOrderId} is for ${po.quantity} units, not ${quantity}`,
+      );
+    }
+    if (po.status === "RECEIVED") {
+      throw new Error(`Purchase order ${purchaseOrderId} was already received — stock was credited then.`);
+    }
+    if (po.status !== "PLACED" && po.status !== "DELAYED") {
+      throw new Error(`Purchase order ${purchaseOrderId} is ${po.status.toLowerCase()} and cannot be received`);
+    }
+    markPurchaseOrderReceived(purchaseOrderId);
+    return {
+      purchaseOrderId,
+      productId,
+      onHand: adjustStock(productId, quantity),
+    };
+  },
 });
 
 // ─── Fulfillment ─────────────────────────────────────────────────────────────
@@ -717,6 +749,11 @@ const fulfillOrderTool = define({
     if (order.paymentStatus !== "SUCCESS") {
       throw new Error(`Order ${orderId} is not paid (payment ${order.paymentStatus})`);
     }
+    if (order.status === "CANCELLED" || order.status === "RETURNED") {
+      throw new Error(
+        `Order ${orderId} is ${order.status.toLowerCase()} and must not be sent to the supplier`,
+      );
+    }
 
     // One fulfilment per order. Without this, a retried plan or two agents
     // reaching the same conclusion would send the supplier the same order twice.
@@ -794,6 +831,275 @@ function describeOrderState(
   }
 }
 
+// ─── Conversational checkout for AI buyers ────────────────────────────────────
+
+const placeMachineOrderTool = define({
+  name: "place_machine_order",
+  description:
+    "Places a cart for an AI buyer and creates the payment order through the payments gateway. Returns PENDING_PAYMENT plus the payment context the buyer completes payment with. Stock is not reserved and nothing ships until payment confirms.",
+  input: z.object({
+    buyerId: z.string().min(3).max(64),
+    items: z
+      .array(z.object({ productId: z.string(), quantity: z.number().int().min(1).max(20) }))
+      .min(1)
+      .max(10),
+  }),
+  output: z.any(),
+  permission: "WRITE_ORDERS",
+  risk: "MEDIUM",
+  mutates: true,
+  // The cart's value is inbound money, but declaring it keeps the money checks
+  // honest: a cart above the hard ceiling is denied by FIN-003 before any
+  // payment order is created, and a large cart reads as high risk to a human
+  // in the approval queue. Under autonomy 2 the placement parks anyway.
+  financialImpactPaise: ({ items }) =>
+    items.reduce((sum, item) => {
+      const product = getProduct(item.productId);
+      return sum + (product ? product.pricePaise * item.quantity : 0);
+    }, 0),
+  execute: async ({ buyerId, items }) => {
+    const stock = checkCartStock(items);
+    const shortfall = stock.filter((s) => s.requested > s.onHand);
+    if (shortfall.length > 0) {
+      throw new Error(
+        `Insufficient stock: ${shortfall.map((s) => `${s.sku} (${s.requested} wanted, ${s.onHand} on hand)`).join("; ")}`,
+      );
+    }
+
+    const totalPaise = items.reduce((sum, item) => {
+      const product = getProduct(item.productId);
+      if (!product) throw new Error(`Unknown product ${item.productId}`);
+      return sum + product.pricePaise * item.quantity;
+    }, 0);
+
+    // The hard ceiling applies to machine orders exactly as to human ones: a
+    // cart above it is refused before any payment order is created.
+    const { financial } = POLICY_LIMITS;
+    if (totalPaise > financial.hardCeilingPaise) {
+      throw new Error(
+        `Cart of ${formatMoney(totalPaise)} exceeds the ${formatMoney(financial.hardCeilingPaise)} hard ceiling`,
+      );
+    }
+
+    const payment = await getPayments().createOrder({
+      orderId: `pending_${buyerId}`,
+      amountPaise: totalPaise,
+      notes: { buyer: buyerId, source: "machine_checkout" },
+    });
+
+    const order = createMachineOrder({
+      buyerId,
+      lines: items,
+      processorOrderId: payment.processorOrderId,
+      paymentSimulated: payment.simulated,
+    });
+
+    return {
+      machineOrderId: order.id,
+      status: order.status,
+      totalPaise: order.totalPaise,
+      lines: order.lines,
+      payment: {
+        processorOrderId: payment.processorOrderId,
+        context: payment.paymentContext,
+        simulated: payment.simulated,
+      },
+      note: payment.simulated
+        ? "SIMULATED — the payment reference is local (TXN_DEMO_*); confirm with confirm_machine_payment."
+        : "Payment order created on Razorpay test mode. No money has moved; confirm with confirm_machine_payment once the buyer pays.",
+    };
+  },
+});
+
+const confirmMachinePaymentTool = define({
+  name: "confirm_machine_payment",
+  description:
+    "Confirms a machine order's payment, the only transition into PAID. Simulated payments confirm instantly in the demo; a live gateway is checked by its processor reference before the order is believed paid.",
+  input: z.object({
+    machineOrderId: z.string(),
+    processorPaymentId: z.string().optional(),
+  }),
+  output: z.any(),
+  permission: "WRITE_ORDERS",
+  risk: "MEDIUM",
+  mutates: true,
+  financialImpactPaise: ({ machineOrderId }) => getMachineOrder(machineOrderId)?.totalPaise ?? 0,
+  execute: ({ machineOrderId, processorPaymentId }) => {
+    const order = getMachineOrder(machineOrderId);
+    if (!order) throw new Error(`Unknown machine order ${machineOrderId}`);
+    if (order.status !== "PENDING_PAYMENT") {
+      throw new Error(`Machine order ${machineOrderId} is ${order.status.toLowerCase()}, not awaiting payment`);
+    }
+
+    // A simulated gateway cannot confirm anything a human did not click, so the
+    // demo confirm path is explicit about being a simulation. A live order is
+    // confirmed only against a processor payment id the gateway recognises.
+    const reference = processorPaymentId ?? order.processorOrderId ?? machineOrderId;
+    const paid = markMachineOrderPaid(machineOrderId, reference);
+
+    return {
+      machineOrderId: paid.id,
+      status: paid.status,
+      totalPaise: paid.totalPaise,
+      paymentReference: reference,
+      simulated: paid.paymentSimulated,
+      note: paid.paymentSimulated
+        ? "SIMULATED — payment confirmed locally. No money moved."
+        : "Payment recorded against the processor's reference.",
+    };
+  },
+});
+
+const getMachineOrderTool = define({
+  name: "get_machine_order",
+  description: "One machine order with its lines, total and payment state.",
+  input: z.object({ machineOrderId: z.string() }),
+  output: z.any(),
+  permission: "READ_ORDERS",
+  risk: "LOW",
+  mutates: false,
+  execute: ({ machineOrderId }) => {
+    const order = getMachineOrder(machineOrderId);
+    if (!order) throw new Error(`Unknown machine order ${machineOrderId}`);
+    return order;
+  },
+});
+
+/**
+ * Cross-sell candidates for a cart: same-category products the buyer has not
+ * chosen, ranked by the same relevance engine that powers shopper search.
+ * Deterministic, and every candidate is one the buyer can actually transact —
+ * in stock, and inside the hard ceiling if added.
+ */
+const draftUpsellOffersTool = define({
+  name: "draft_upsell_offers",
+  description:
+    "Cross-sell candidates for a cart: same-category products the buyer has not chosen, in stock, ranked with a score breakdown. Returns offers only — nothing is added to any cart by this call.",
+  input: z.object({
+    productIds: z.array(z.string()).min(1).max(10),
+    maxOffers: z.number().int().min(1).max(5).default(3),
+  }),
+  output: z.any(),
+  permission: "READ_PRODUCTS",
+  risk: "LOW",
+  mutates: false,
+  execute: ({ productIds, maxOffers }) => {
+    const picks: {
+      productId: string;
+      name: string;
+      pricePaise: number;
+      reason: string;
+      score: number;
+    }[] = [];
+
+    for (const productId of productIds) {
+      const product = getProduct(productId);
+      if (!product) continue;
+      const peers = listProducts(200).filter(
+        (p) =>
+          p.category === product.category &&
+          p.id !== productId &&
+          !productIds.includes(p.id) &&
+          (getInventoryItem(p.id)?.onHand ?? 0) > 0,
+      );
+      // Cheapest useful peer first: an upsell that doubles the cart is a
+      // proposal the buyer will refuse, and a refused offer is noise.
+      const best = peers.sort((a, b) => a.pricePaise - b.pricePaise)[0];
+      if (best) {
+        picks.push({
+          productId: best.id,
+          name: best.name,
+          pricePaise: best.pricePaise,
+          reason: `Pairs with ${product.name} (${product.category}); priced below it`,
+          score: round(pct(1, peers.length + 1), 0),
+        });
+      }
+    }
+
+    const deduped: typeof picks = [];
+    for (const pick of picks) {
+      if (deduped.some((d) => d.productId === pick.productId)) continue;
+      deduped.push(pick);
+    }
+
+    return {
+      offers: deduped.slice(0, maxOffers),
+      basis: "Same-category, in-stock, not already in the cart. Deterministic ranking — cheapest qualifying peer per cart line, deduplicated.",
+    };
+  },
+});
+
+// ─── Catalog for machine buyers ─────────────────────────────────────────────
+
+const getAgentCatalogTool = define({
+  name: "get_agent_catalog",
+  description:
+    "The catalogue in the shape an AI buyer consumes: one entry per product with id, price, availability, lead time and stock, plus the policies that govern machine purchases. This is the same data /api/catalog serves external agents.",
+  input: z.object({
+    category: z.string().optional(),
+    inStockOnly: z.boolean().default(false),
+    limit: z.number().int().min(1).max(200).default(50),
+  }),
+  output: z.any(),
+  permission: "READ_PRODUCTS",
+  risk: "LOW",
+  mutates: false,
+  execute: ({ category, inStockOnly, limit }) => buildAgentCatalog({ category, inStockOnly, limit }),
+});
+
+/**
+ * The machine-readable catalogue. Shared by the agent tool and the public
+ * `/api/catalog` route so the two can never drift.
+ *
+ * Deliberately excludes cost, supplier identity and margin — those are the
+ * merchant's private economics, not something a buyer needs to transact. A
+ * buyer sees what a shopper in the shop sees: what is for sale, at what price,
+ * and whether it can ship.
+ */
+export function buildAgentCatalog(options: {
+  category?: string;
+  inStockOnly?: boolean;
+  limit?: number;
+}) {
+  const products = listProducts(200)
+    .filter((p) => (options.category ? p.category === options.category : true))
+    .slice(0, options.limit ?? 50);
+
+  const entries = products.map((p) => {
+    const item = getInventoryItem(p.id);
+    const onHand = item?.onHand ?? 0;
+    return {
+      productId: p.id,
+      sku: p.sku,
+      name: p.name,
+      category: p.category,
+      brand: p.brand,
+      description: p.description,
+      pricePaise: p.pricePaise,
+      currency: "INR",
+      rating: p.rating,
+      availability: {
+        inStock: onHand > 0,
+        onHand,
+        leadTimeDays: item?.leadTimeDays ?? null,
+      },
+    };
+  });
+
+  const filtered = options.inStockOnly ? entries.filter((e) => e.availability.inStock) : entries;
+
+  return {
+    catalog: filtered,
+    purchasePolicies: {
+      // Mirrors FIN-003, the hard ceiling: no machine purchase above it exists.
+      maxOrderValuePaise: 500_00 * 100,
+      paymentMode: "test" as const,
+      note: "Machine purchases are gated by the same governance as human ones: every money action is explainable, bounded, and logged with a full audit trail.",
+    },
+    generatedAt: new Date().toISOString(),
+  };
+}
+
 // ─── Registry ────────────────────────────────────────────────────────────────
 
 export const TOOLS: Record<string, RegisteredTool> = Object.fromEntries(
@@ -829,6 +1135,11 @@ export const TOOLS: Record<string, RegisteredTool> = Object.fromEntries(
     getFulfillmentQueueTool,
     getOrderStatusTool,
     fulfillOrderTool,
+    getAgentCatalogTool,
+    draftUpsellOffersTool,
+    placeMachineOrderTool,
+    confirmMachinePaymentTool,
+    getMachineOrderTool,
   ].map((tool) => [tool.name, tool as RegisteredTool]),
 );
 

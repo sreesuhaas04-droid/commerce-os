@@ -268,6 +268,10 @@ function approvalTitle(
       return `Change reorder point for ${input.productId} by ${input.delta}`;
     case "reply_ticket":
       return `Reply to ticket ${input.ticketId}`;
+    case "place_machine_order":
+      return `Place AI-buyer cart ${input.buyerId ? `for ${input.buyerId}` : ""}`;
+    case "confirm_machine_payment":
+      return `Confirm payment on machine order ${input.machineOrderId}`;
     default:
       return `Run ${toolName}`;
   }
@@ -303,6 +307,9 @@ const ENTITY_TYPES: Record<string, string> = {
   propose_budget_change: "campaign",
   pause_campaign: "campaign",
   draft_campaign_copy: "product",
+  place_machine_order: "machine_order",
+  confirm_machine_payment: "machine_order",
+  get_machine_order: "machine_order",
 };
 
 const entityTypeFor = (toolName: string): string => ENTITY_TYPES[toolName] ?? "business";
@@ -310,8 +317,15 @@ const entityTypeFor = (toolName: string): string => ENTITY_TYPES[toolName] ?? "b
 function entityIdFor(input: unknown): string {
   if (!input || typeof input !== "object") return "-";
   const record = input as Record<string, unknown>;
-  for (const key of ["productId", "orderId", "campaignId", "ticketId", "purchaseOrderId"]) {
-    if (typeof record[key] === "string") return record[key];
+  for (const key of ["productId", "orderId", "campaignId", "ticketId", "purchaseOrderId", "machineOrderId"]) {
+    if (typeof record[key] === "string") return record[key] as string;
+  }
+  // A machine cart's entity is the buyer's session: one pending cart per buyer
+  // is the rule, so a second pending request for the same buyer is a duplicate
+  // even though no single field carries it.
+  if (record.toolName !== undefined) return "-";
+  if (typeof record.buyerId === "string" && typeof record.items === "object") {
+    return `buyer:${record.buyerId}`;
   }
   return "-";
 }
@@ -329,6 +343,7 @@ function emitDomainEvent(
     create_refund: "REFUND_REQUESTED",
     propose_budget_change: "CAMPAIGN_PERFORMANCE_CHANGED",
     pause_campaign: "CAMPAIGN_PERFORMANCE_CHANGED",
+    place_machine_order: "MACHINE_ORDER_CREATED",
   };
   const type = mapping[toolName];
   if (!type) return;
